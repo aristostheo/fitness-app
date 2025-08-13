@@ -10,9 +10,14 @@ const exerciseCol  = (uid) => collection(db, "users", uid, "exerciseEntries");  
 
 // ---- FOOD ENTRIES ----
 export async function addFood(uid, food) {
-  // food: { date:'YYYY-MM-DD', meal:'breakfast|lunch|dinner|snacks', name, calories, protein, carbs, fat, sugar, fiber, qty, unit }
-  return addDoc(foodsCol(uid), { ...food, createdAt: serverTimestamp() });
+  // food: { date, meal, name, calories, protein, carbs, fat, sugar, fiber, qty, unit }
+  return addDoc(foodsCol(uid), {
+    ...food,
+    createdAt: serverTimestamp(),
+    createdAtMs: Date.now(),      // ← immediate local sort key
+  });
 }
+
 
 export async function updateFood(uid, id, patch) {
   return updateDoc(doc(db, "users", uid, "nutritionEntries", id), patch);
@@ -23,7 +28,11 @@ export async function deleteFood(uid, id) {
 }
 
 export function subscribeFoodsByDate(uid, date, cb) {
-  const q = query(foodsCol(uid), where("date", "==", date), orderBy("createdAt", "desc"));
+  const q = query(
+    foodsCol(uid),
+    where("date", "==", date),
+    orderBy("createdAtMs", "desc") // ← sorts immediately
+  );
   return onSnapshot(q, (snap) => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
 }
 

@@ -10,10 +10,22 @@ import {
   deleteWorkout,
   updateWorkout,
 } from "../services/workouts";
+import {
+  addWorkoutPreset,
+  subscribeWorkoutPresets,
+  deleteWorkoutPreset,
+} from "../services/presets";
 import VolumeChart from "../components/VolumeChart";
-import WeeklyWorkoutsChart from "../components/WeeklyWorkoutsChart";
+import { ensureProfile, subscribeProfile, updateProfile } from "../services/profile";
+
+
+// (Optional) If you added the weekly chart earlier:
+// import WeeklyWorkoutsChart from "../components/WeeklyWorkoutsChart";
 
 // --- date helpers ---
+const kgToLb = (kg) => (kg ?? 0) * 2.2046226218;
+const lbToKg = (lb) => (lb ?? 0) / 2.2046226218;
+
 const pad = (n) => String(n).padStart(2, "0");
 const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 function startOfWeek(date) {
@@ -34,6 +46,7 @@ function endOfToday(date) {
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
+
   const [workouts, setWorkouts] = useState([]);
 
   // add form
@@ -47,7 +60,6 @@ export default function Dashboard() {
   // filters
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  // preset quick filter
   const [preset, setPreset] = useState("all"); // 'week'|'7'|'month'|'30'|'all'|'custom'
 
   // editing
@@ -60,30 +72,10 @@ export default function Dashboard() {
     weight: "",
     notes: "",
   });
-  const weekKey = (yyyyMmDd) => {
-    const [y,m,d] = yyyyMmDd.split("-").map(Number);
-    const dt = new Date(y, m-1, d);
-    // ISO week (Mon-start)
-    const day = (dt.getDay() + 6) % 7; // 0..6 Mon..Sun
-    const thursday = new Date(dt); thursday.setDate(dt.getDate() - day + 3);
-    const year = thursday.getFullYear();
-    const jan4 = new Date(year, 0, 4);
-    const week = Math.round((thursday - jan4) / 86400000 / 7) + 1;
-    return `${year}-W${String(week).padStart(2,"0")}`;
-  };
 
-  const workoutsPerWeek = useMemo(() => {
-    const map = {};
-    workouts.forEach(w => {
-      if (!w.date) return;
-      const key = weekKey(w.date);
-      map[key] = (map[key] || 0) + 1;
-    });
-    return Object.entries(map)
-      .sort((a,b) => a[0].localeCompare(b[0]))
-      .map(([week, count]) => ({ week, count }));
-  }, [workouts]);
-
+  // workout presets
+  const [workoutPresets, setWorkoutPresets] = useState([]);
+  const [newWOPresetName, setNewWOPresetName] = useState("");
 
   // react to preset changes
   useEffect(() => {
@@ -121,56 +113,67 @@ export default function Dashboard() {
     }
   }, [preset]);
 
-  // simple guard: if from > to, clear to
+  // guard
   useEffect(() => {
     if (from && to && from > to) setTo("");
   }, [from, to]);
 
-  // // subscribe to Firestore (server-side filtering)
-  // useEffect(() => {
-  //   if (!user) return;
-  //   const unsub = subscribeWorkouts(user.uid, setWorkouts, { from, to });
-  //   return () => unsub && unsub();
-  // }, [user, from, to]);
+  const [profile, setProfile] = useState(null);
+  const unit = profile?.weightUnit === "lb" ? "lb" : "kg";
 
   useEffect(() => {
     if (!user) return;
     const unsubs = [];
+    (async () => {
+      await ensureProfile(user.uid);
+      unsubs.push(subscribeProfile(user.uid, setProfile));
+    })();
+    return () => { for (const u of unsubs) try { typeof u === "function" && u(); } catch {} };
+  }, [user]);
+
+
+  // subscribe (workouts + presets) with bullet-proof cleanup
+  useEffect(() => {
+    if (!user) return;
+    const unsubs = [];
     unsubs.push(subscribeWorkouts(user.uid, setWorkouts, { from, to }));
+    unsubs.push(subscribeWorkoutPresets(user.uid, setWorkoutPresets));
     return () => {
-      for (const u of unsubs) { try { typeof u === "function" && u(); } catch {} }
+      for (const u of unsubs) {
+        try {
+          typeof u === "function" && u();
+        } catch {}
+      }
     };
   }, [user, from, to]);
 
   const onAdd = async (e) => {
     e.preventDefault();
     if (!user) return;
+    const weightKg = unit === "lb" ? lbToKg(Number(weight || 0)) : Number(weight || 0);
     await addWorkout(user.uid, {
-      date,
-      exercise,
+      date, exercise,
       sets: Number(sets || 0),
       reps: Number(reps || 0),
-      weight: Number(weight || 0),
+      weight: weightKg, // ← store kg
       notes,
     });
-    setExercise("");
-    setSets("");
-    setReps("");
-    setWeight("");
-    setNotes("");
+    setExercise(""); setSets(""); setReps(""); setWeight(""); setNotes("");
   };
 
-  const startEdit = (w) => {
-    setEditId(w.id);
-    setEditData({
-      date: w.date || "",
-      exercise: w.exercise || "",
-      sets: w.sets ?? "",
-      reps: w.reps ?? "",
-      weight: w.weight ?? "",
-      notes: w.notes || "",
-    });
-  };
+
+    const startEdit = (w) => {
+      setEditId(w.id);
+      setEditData({
+        date: w.date || "",
+        exercise: w.exercise || "",
+        sets: w.sets ?? "",
+        reps: w.reps ?? "",
+        weight: unit === "lb" ? Math.round(kgToLb(w.weight) * 100) / 100 : (w.weight ?? ""),
+        notes: w.notes || "",
+      });
+    };
+
 
   const saveEdit = async (e) => {
     e.preventDefault();
@@ -178,8 +181,9 @@ export default function Dashboard() {
       ...editData,
       sets: Number(editData.sets || 0),
       reps: Number(editData.reps || 0),
-      weight: Number(editData.weight || 0),
+      weight: unit === "lb" ? lbToKg(Number(editData.weight || 0)) : Number(editData.weight || 0),
     });
+
     setEditId(null);
   };
 
@@ -190,7 +194,7 @@ export default function Dashboard() {
     navigate("/login");
   };
 
-  // chart data (from filtered workouts)
+  // chart data
   const volumeByDate = useMemo(() => {
     const map = {};
     workouts.forEach((w) => {
@@ -207,15 +211,27 @@ export default function Dashboard() {
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
         <div className="bg-white rounded-xl shadow p-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Dashboard</h1>
-            <p className="text-sm text-gray-600">
-              Signed in as <b>{user?.email}</b>
-            </p>
+          <div className="flex items-center gap-3">
+            <div>
+              <h1 className="text-2xl font-bold">Workouts</h1>
+              <p className="text-sm text-gray-600">Signed in as <b>{user?.email}</b></p>
+            </div>
           </div>
-          <button onClick={logout} className="px-4 py-2 rounded bg-gray-800 text-white">
-            Log out
-          </button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-600">Weight:</span>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded border bg-white hover:bg-gray-50"
+                onClick={() => updateProfile(user.uid, { weightUnit: unit === "kg" ? "lb" : "kg" })}
+                title="Toggle weight unit"
+              >
+                {unit.toUpperCase()}
+              </button>
+            </div>
+            <input className="border rounded px-3 py-2" type="date" value={date} onChange={e=>setDate(e.target.value)} />
+            <button onClick={logout} className="px-4 py-2 rounded bg-gray-800 text-white">Log out</button>
+          </div>
         </div>
 
         {/* Filters */}
@@ -314,7 +330,7 @@ export default function Dashboard() {
             />
             <input
               className="border rounded px-3 py-2"
-              placeholder="Weight (kg)"
+              placeholder={`Weight (${unit})`}
               value={weight}
               onChange={(e) => setWeight(e.target.value)}
               inputMode="numeric"
@@ -328,6 +344,76 @@ export default function Dashboard() {
             <button className="px-4 py-2 rounded bg-blue-600 text-white md:col-span-1">
               Save
             </button>
+
+            {/* Save current form as preset */}
+            <div className="md:col-span-6 flex gap-2 items-center">
+              <input
+                className="border rounded px-3 py-2"
+                placeholder="Preset name (e.g., Bench 5x5)"
+                value={newWOPresetName}
+                onChange={(e) => setNewWOPresetName(e.target.value)}
+              />
+              <button
+                type="button"
+                className="px-3 py-2 rounded bg-gray-700 text-white"
+                onClick={async () => {
+                  if (!user || !newWOPresetName.trim() || !exercise.trim()) return;
+                  await addWorkoutPreset(user.uid, {
+                    exercise: newWOPresetName.trim(), // display name for the preset
+                    sets: Number(sets || 0),
+                    reps: Number(reps || 0),
+                    weight: Number(weight || 0),
+                    notes,
+                  });
+                  setNewWOPresetName("");
+                }}
+              >
+                Save as Preset
+              </button>
+            </div>
+
+            {/* Quick add from presets */}
+            <div className="md:col-span-6">
+              <h3 className="text-sm font-medium mb-2">Quick add from presets</h3>
+              {workoutPresets.length === 0 ? (
+                <p className="text-sm text-gray-600">No workout presets yet.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {workoutPresets.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center gap-2 border rounded-xl px-3 py-1.5 bg-white"
+                    >
+                      <button
+                        type="button"
+                        className="text-blue-600 hover:underline"
+                        onClick={async () => {
+                          if (!user) return;
+                          await addWorkout(user.uid, {
+                            date,
+                            exercise: p.exercise,
+                            sets: Number(p.sets || 0),
+                            reps: Number(p.reps || 0),
+                            weight: Number(p.weight || 0),
+                            notes: p.notes || "",
+                          });
+                        }}
+                      >
+                        + {p.exercise}
+                      </button>
+                      <button
+                        type="button"
+                        className="text-red-600 hover:underline"
+                        onClick={() => deleteWorkoutPreset(user.uid, p.id)}
+                        aria-label={`Delete preset ${p.exercise}`}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </form>
         </div>
 
@@ -346,39 +432,57 @@ export default function Dashboard() {
                         className="border rounded px-3 py-2"
                         type="date"
                         value={editData.date}
-                        onChange={(e) => setEditData((v) => ({ ...v, date: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, date: e.target.value }))
+                        }
                       />
                       <input
                         className="border rounded px-3 py-2 md:col-span-2"
                         value={editData.exercise}
-                        onChange={(e) => setEditData((v) => ({ ...v, exercise: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, exercise: e.target.value }))
+                        }
                       />
                       <input
                         className="border rounded px-3 py-2"
                         value={editData.sets}
-                        onChange={(e) => setEditData((v) => ({ ...v, sets: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, sets: e.target.value }))
+                        }
                         inputMode="numeric"
                       />
                       <input
                         className="border rounded px-3 py-2"
                         value={editData.reps}
-                        onChange={(e) => setEditData((v) => ({ ...v, reps: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, reps: e.target.value }))
+                        }
                         inputMode="numeric"
                       />
                       <input
                         className="border rounded px-3 py-2"
                         value={editData.weight}
-                        onChange={(e) => setEditData((v) => ({ ...v, weight: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, weight: e.target.value }))
+                        }
                         inputMode="numeric"
                       />
                       <input
                         className="border rounded px-3 py-2 md:col-span-5"
                         value={editData.notes}
-                        onChange={(e) => setEditData((v) => ({ ...v, notes: e.target.value }))}
+                        onChange={(e) =>
+                          setEditData((v) => ({ ...v, notes: e.target.value }))
+                        }
                       />
                       <div className="flex gap-2 md:col-span-1">
-                        <button className="px-4 py-2 rounded bg-blue-600 text-white">Save</button>
-                        <button type="button" onClick={cancelEdit} className="px-4 py-2 rounded bg-gray-200">
+                        <button className="px-4 py-2 rounded bg-blue-600 text-white">
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEdit}
+                          className="px-4 py-2 rounded bg-gray-200"
+                        >
                           Cancel
                         </button>
                       </div>
@@ -387,7 +491,7 @@ export default function Dashboard() {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium">
-                          {w.exercise} • {w.sets || 0} x {w.reps || 0} @ {w.weight || 0}kg
+                          {w.exercise} • {w.sets || 0} x {w.reps || 0} @ {Math.round((unit==="lb" ? kgToLb(w.weight) : w.weight) || 0)}{unit}
                         </p>
                         <p className="text-sm text-gray-600">
                           {w.date}
@@ -395,10 +499,16 @@ export default function Dashboard() {
                         </p>
                       </div>
                       <div className="flex gap-3">
-                        <button onClick={() => startEdit(w)} className="text-blue-600 hover:underline">
+                        <button
+                          onClick={() => startEdit(w)}
+                          className="text-blue-600 hover:underline"
+                        >
                           Edit
                         </button>
-                        <button onClick={() => deleteWorkout(user.uid, w.id)} className="text-red-600 hover:underline">
+                        <button
+                          onClick={() => deleteWorkout(user.uid, w.id)}
+                          className="text-red-600 hover:underline"
+                        >
                           Delete
                         </button>
                       </div>
@@ -410,9 +520,10 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Chart */}
+        {/* Charts */}
         <VolumeChart data={volumeByDate} />
-        <WeeklyWorkoutsChart data={workoutsPerWeek} />
+        {/* If you added the weekly chart earlier: */}
+        {/* <WeeklyWorkoutsChart data={workoutsPerWeek} /> */}
       </div>
     </div>
   );

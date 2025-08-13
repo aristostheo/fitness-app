@@ -7,6 +7,7 @@ import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 import Dashboard from "./pages/Dashboard";
 import Nutrition from "./pages/Nutrition";
+import Settings from "./pages/Settings";
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
             <Route path="/" element={<Home />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/nutrition" element={<Nutrition />} />
+            <Route path="/settings" element={<Settings />} />
           </Route>
         </Route>
 
